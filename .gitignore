@@ -4,6 +4,8 @@
 # Python
 __pycache__/
 .pytest_cache/
+.pytest_tmp/
+pytest_tmp_run*/
 *.pyc
 *.pyo
 
@@ -18,7 +20,8 @@ __pycache__/
 
 # Benchmark data (too large)
 benchmarks/data/
-benchmarks/reports/
+benchmarks/tmp*/
+benchmarks/workspaces/
 
 # Debug
 bug/

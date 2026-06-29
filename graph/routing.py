@@ -117,6 +117,9 @@ def route_after_execute(
     iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 30)
 
+    if state.get("auditor_blocked") and isinstance(last_message, AIMessage):
+        return "finish"
+
     # ── 1. LLM wants to call tools ──────────────────────────
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"

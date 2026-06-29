@@ -1,198 +1,243 @@
-# Claude Code Mini V3.0
+# MiniCode
 
-A weekend-buildable Coding Agent powered by LangChain + LangGraph.
+MiniCode is a terminal Coding Agent based on the open-source MiniCode project
+from `myx-99/minicode`, with secondary development in this repository for local
+initialization, reliability fixes, lightweight memory fallback, Intent Auditor
+blocked-path handling, and a small evaluation Harness.
 
-```
-LLM + Mode-Aware Tools (Ask/Agent/Plan) + Cross-Turn Memory + Model-Driven Agent Loop = Claude Code Mini V3.0
-```
+This is not a fully from-scratch project. Keep upstream attribution and verify
+the upstream license before public reuse. The original README declares MIT, but
+this repository currently does not include a separate `LICENSE` file.
 
-## Quick Start
+## What It Does
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+MiniCode runs an LLM-driven coding loop in a workspace. It uses LangGraph for
+control flow, LangChain tool-calling interfaces for model/tool interaction, and
+six local tools for file reading, file writing, precise edits, grep search, glob
+search, and shell execution.
 
-# 2. Configure API key
-cp .env.example .env
-# Edit .env — set OPENAI_API_KEY (or ANTHROPIC_API_KEY)
+The three user-facing modes are:
 
-# 3. Run (default: agent mode — model decides tool usage)
-python main.py "Fix the bug in main.py"
-
-# 4. Run in ask mode (read-only exploration)
-python main.py --mode ask "Explain the project architecture"
-
-# 5. Run in plan mode (Plan-and-Execute, user opt-in)
-python main.py --mode plan "Refactor the auth module"
-```
-
-## Local Configuration
-
-Use `D:\App\Anaconda\envs\minicode\python.exe` for local validation on Windows:
-
-```powershell
-D:\App\Anaconda\envs\minicode\python.exe -m pip install -r requirements.txt
-D:\App\Anaconda\envs\minicode\python.exe main.py --mode ask --no-memory "Explain the project architecture"
-```
-
-For the first local baseline run, copy `.env.example` to `.env`, fill only the provider key you intend to use, and keep optional external features disabled:
-
-```env
-INTENT_AUDITOR_ENABLED=false
-AUDITOR_TWO_LAYER=false
-MEMORY_ENABLED=false
-```
-
-`ProjectMemory` is also avoided by passing `--no-memory` to the CLI. Do not commit `.env` or real API keys.
-
-## Features
-
-### V3 (new — Product Alignment)
-- **Three Modes**: `ask` (read-only, 3 tools) / `agent` (full control, default) / `plan` (Plan-and-Execute, opt-in)
-- **Model-Driven Agent Loop**: Agent decides whether and when to use tools — no regex pre-classification
-- **Mode-Aware Tool Registry**: `ask` mode physically prevents write/edit/shell calls
-- **Smart Finish**: `len(tool_history)==0` → direct answer pass-through; tools used → structured coding summary
-- **Backward Compatible**: `--mode react` maps to `agent` with deprecation warning
-
-### V2.1 (baseline)
-- **Cross-Turn Memory**: REPL remembers previous tasks in the same session — follow-up questions like "delete what I just did" work
-- **Two-Layer Memory**: `SessionMemory` (in-process turn history) + `ProjectMemory` (disk-persisted turns.jsonl)
-- **Meta Query Detection**: Auto-detects questions about previous tasks ("刚才完成了什么") and recalls session history
-- **Memory Manager**: Unified `MemoryManager` shared across REPL turns — mode switch preserves session
-
-Intent Auditor experiment
-
-### V2 (baseline)
-- **LLM Signal Protocol**: Agent can declare task_complete or request replan autonomously
-- **Context Window Management**: Token-budget-based rolling summarization — no more "discard after 40 messages"
-- **6 Core Tools**: read_file, write_file, edit_file, grep_search, glob_search, shell_execute
-
-### V1 (baseline)
-- **Plan + Execute**: LLM decomposes tasks into steps, then executes with tool calling
-- **Self-Reflection**: LLM evaluates each step — recovers from errors, retries, or replans
-- **Streaming CLI**: Real-time progress display with Rich
-- **Workspace Security**: All file ops confined to project root
+- `ask`: read-only exploration with `read_file`, `grep_search`, and `glob_search`.
+- `agent`: default tool-using coding mode with all six tools.
+- `plan`: plan-and-execute mode with plan auditing before execution.
 
 ## Architecture
 
-```
-                          ┌─ ask  (read-only) ─── no write/edit/shell ─┐
-V3 Three Modes ───────────┼─ agent (default) ──── full 6 tools ────────┤
-                          └─ plan  (opt-in) ────── plan → execute → reflect ──┘
+Core workflow:
 
-Ask / Agent mode graph (model-driven React loop):
-    START → [init] → [execute] ⇄ [tools] → [finish] → END
-    (Model autonomously decides tool usage. Simple Q&A = 0 tools.)
-
-Plan mode graph (Plan-and-Execute, user opt-in):
-    START → [init] → [plan] → [execute] ⇄ [tools] → [reflect] → [finish] → END
+```text
+User task
+  -> init_node
+  -> execute_node
+  -> tools_node when the model emits tool calls
+  -> execute_node until the model emits task_complete
+  -> finish_node
 ```
 
-## Project Structure
+Plan mode adds:
 
-```
-owncode/
-├── agent/          # Agent core + State (V3: mode="ask"|"agent"|"plan")
-├── graph/          # LangGraph nodes + builder + routing (V3: three-mode)
-├── memory/         # SessionMemory + ProjectMemory + MemoryManager
-├── tools/          # 6 tools + mode-aware registry (V3: create_for_mode)
-├── prompts/        # System prompt + templates (V3: mode-aware)
-├── runtime/        # Workspace management + shell platform detection
-├── config/         # Settings + LLM factory (V3: default agent_mode="agent")
-├── cli/            # Rich CLI (V3: /mode ask|agent|plan)
-├── tests/          # 276 tests
-├── main.py         # Entry point (V3: --mode ask|agent|plan)
-├── report/v3/      # V3 alignment report
-└── requirements.txt
+```text
+init_node -> plan_node -> audit_plan_node -> execute/tools/reflect/replan -> finish_node
 ```
 
-## Usage
+Main components:
 
-```bash
-# Interactive REPL (default: agent mode)
-python main.py
+- `agent/agent.py`: `ClaudeCodeMini` public Agent wrapper.
+- `graph/builder.py`: LangGraph graph construction for Ask, Agent, and Plan.
+- `graph/nodes.py`: planning, execution, tool, reflection, replan, finish, and auditor logic.
+- `tools/`: six local tools.
+- `memory/`: session memory, project JSONL memory, and vector-search integration.
+- `intent_auditor/`: NLI/embedding-based intent alignment checks.
+- `benchmarks/smoke_eval.py`: lightweight Coding Agent Harness.
 
-# Interactive REPL (ask mode — read-only)
-python main.py --mode ask
+## Tools
 
-# Interactive REPL (plan mode — user reviews plan first)
-python main.py --mode plan
+Ask mode exposes three read-only tools:
 
-# Single task (agent mode — model-driven)
-python main.py "Add logging to all modules"
+- `read_file`
+- `grep_search`
+- `glob_search`
 
-# Single task (ask mode — explore without modifying)
-python main.py --mode ask "How does the auth module work?"
+Agent and Plan modes expose all six tools:
 
-# Custom workspace + model
-python main.py -w /my/project -m gpt-4o-mini "Fix import errors"
+- `read_file`
+- `write_file`
+- `edit_file`
+- `grep_search`
+- `glob_search`
+- `shell_execute`
 
-# Disable memory
-python main.py --no-memory "Temporary task"
+Shell safety is workspace-oriented command execution with basic blocking rules.
+It is not a full operating-system sandbox.
 
-# Custom context budget
-python main.py --context-max-tokens 50000 "Read many files"
+## Installation
 
-# Options
-python main.py --help
+Use the fixed local Python environment for this workspace:
+
+```powershell
+Set-Location "D:\App\Codex\workspaces\minicode"
+D:\App\Anaconda\envs\minicode\python.exe -m pip install -r requirements.txt
+D:\App\Anaconda\envs\minicode\python.exe -m pip install pytest pytest-asyncio
 ```
 
-### REPL Commands
+Do not commit `.env` or real API keys.
 
-| Command | Action |
-|---------|--------|
-| `/mode plan` | Switch to Plan mode (V1 behavior) |
-| `/mode react` | Switch to React mode (free ReAct) |
-| `/memory` | Show session turn list + project turn count |
-| `/memory clear` | Clear both session and project memory |
-| `quit`/`exit`/`q` | Exit REPL |
+## Environment
 
-## Run Tests
+Create a local `.env` from `.env.example` and fill only placeholder values you
+actually use:
 
-```bash
-pytest tests/ -v
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your-api-key
+OPENAI_API_BASE=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o
+
+MEMORY_ENABLED=false
+INTENT_AUDITOR_ENABLED=false
+AUDITOR_TWO_LAYER=false
 ```
 
-**252 tests** covering tools, graph, planner, reflector, replan, dual-mode routing, context management, cross-turn memory, session memory, CLI, and integration.
+For OpenAI-compatible domestic providers, keep `LLM_PROVIDER=openai` and set the
+compatible base URL and model name. Example shape only:
 
-## What's New in V2.1
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your-provider-key
+OPENAI_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+OPENAI_MODEL=qwen-plus
+```
 
-| V2 Issue | V2.1 Solution |
-|----------|---------------|
-| B1: REPL can't reference previous tasks | `SessionMemory` shared across turns in same process |
-| B2: "What did I just do" fails | Meta query detection + auto-inject recent session turns |
-| B3: Memory entries written with empty summary | `finish_node` writes memory AFTER `final_answer` generation |
-| V2 `MemoryEntry` fragments | Unified `TurnRecord` — complete task record per turn |
+The selected model must support tool calling for Agent and Plan modes. If a
+provider rejects the model name or does not support tool calls, the Agent cannot
+complete tool-based steps.
 
-## What's New in V2
+## Commands
 
-| V1 Issue | V2 Solution |
-|----------|-------------|
-| P0-1: LLM can't autonomously finish | React mode + `task_complete` signal routing |
-| P0-2: Plan is static | execute→replan active routing (both modes) |
-| P1-1: Messages > 40 discarded | ContextManager: rolling summarization |
-| P1-2: Extra LLM call for reflect | React mode skips reflect entirely |
-| Cross-session memory | LongTermMemory + `.agent/memory/` |
+Ask mode:
 
-## Design Principles
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe main.py --mode ask --no-memory "读取 README.md，用三句话说明该项目实现了什么功能。不要修改文件。"
+```
 
-- **Working First, Architecture Second** — MVP runs before any abstraction
-- **Simplicity** — 6 tools, 7-5 nodes (plan/react), ~11K lines
-- **LangChain + LangGraph** — Production-grade primitives, zero lock-in
-- **Extensible** — V2.1-V5 roadmap clear, interfaces clean
-- **Backward Compatible** — Plan mode = V1 behavior, all V1 tests still pass
+Agent mode:
 
-## Roadmap
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe main.py --mode agent --no-memory "为 demo.py 中的 add 函数增加类型注解和 docstring，不要修改其他文件。"
+```
 
-| Version | Feature | Status |
-|---------|---------|--------|
-| V1 | 6 tools + ReAct Loop + Planning + Reflection | ✅ Complete |
-| V2 | Dual mode + Context management + Long-term memory | ✅ Complete |
-| V2.1 | Cross-turn memory + Session/Project layers + Meta query detection | ✅ Complete |
-| V3 | RAG, vector search, embedding-based retrieval | 🔲 Planned |
-| V4 | Multi-agent, MCP protocol | 🔲 Planned |
-| V5 | Plugin system, IDE integration | 🔲 Planned |
+Plan mode:
 
-## License
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe main.py --mode plan --no-memory "检查项目测试失败原因并给出修复计划。"
+```
 
-MIT
+Interactive REPL:
+
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe main.py --mode agent --no-memory
+```
+
+## Memory
+
+MiniCode has session memory and project memory:
+
+- Session memory keeps recent turns in the current REPL process.
+- Project memory persists turn records as JSONL under the current project scope.
+- Vector memory is used when `mini_vector_db` and its embedding client are available.
+- When vector search is unavailable or fails, `ProjectMemory.search()` now falls
+  back to local keyword scoring over the current project's JSONL records.
+
+The keyword fallback is a local fallback only; it does not replace semantic
+vector retrieval when a working vector backend is configured.
+
+## Intent Auditor
+
+The Intent Auditor checks whether planned or tool-bound actions align with the
+user's request. The reliability pass fixed the blocked path so a rejected action:
+
+- does not execute the blocked tool call;
+- returns a meaningful final answer instead of `Done.`;
+- records `finish_reason="auditor_blocked"` for callers that need to distinguish it.
+
+The Auditor still depends on the existing embedding or NLI path for non-obvious
+alignment cases. It is not a complete policy or sandbox system.
+
+## Tests
+
+Run the full regression suite:
+
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe -m pytest tests -q -p no:cacheprovider
+```
+
+Verified result after reliability fixes:
+
+```text
+336 passed in 6.80s
+```
+
+Original reliability baseline before fixes:
+
+```text
+320/323 passed
+```
+
+Fixed issue classes:
+
+- Chinese/read-only direct-answer intent detection.
+- `ProjectMemory.search()` fallback when vector components are unavailable.
+- Intent Auditor blocked-path final answer and termination reason.
+
+## Evaluation Harness
+
+The lightweight Harness is intentionally small and local:
+
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe benchmarks\smoke_eval.py --provider mock --runs-per-case 3 --out-dir benchmarks\reports --report-name mock_smoke --python-exe D:\App\Anaconda\envs\minicode\python.exe
+```
+
+Current Harness report:
+
+- Report files: `benchmarks/reports/mock_smoke.json`, `benchmarks/reports/mock_smoke.md`.
+- Task classes: code understanding, code location, single-file edit, bug fix, intent constraint.
+- Run count: 15 mock runs.
+- Mock smoke result: 15/15 passed.
+- Average tool calls: 1.8.
+- Average iterations: 2.8.
+- Average duration: 0.575 seconds.
+- Token usage: unsupported by the current Agent result schema.
+- Formal real-model evaluation: not executed.
+
+The mock result validates Harness plumbing, graph execution, tool calls, scoring,
+and report generation. It must not be presented as a real-model success rate.
+
+To run a real configured model:
+
+```powershell
+D:\App\Anaconda\envs\minicode\python.exe benchmarks\smoke_eval.py --provider configured --runs-per-case 3 --report-name real_model_eval
+```
+
+Only run this after `.env` is configured with a real tool-calling model. Do not
+commit private model responses, keys, or local temporary workspaces.
+
+## Secondary Development Summary
+
+This repository's secondary development work added:
+
+- Reliable Chinese/read-only intent classification for Ask-style requests.
+- Local JSONL keyword fallback for `ProjectMemory`.
+- Safer Intent Auditor blocked-path handling with meaningful final answers.
+- A deterministic smoke evaluation Harness.
+- Updated project and resume documentation.
+
+## Known Limits
+
+- The project is a terminal Coding Agent prototype, not a production-grade system.
+- Shell safety is not a complete system sandbox.
+- Memory fallback is keyword-based and intentionally lightweight.
+- Intent Auditor is useful for obvious mismatch handling but is not a full policy engine.
+- Harness scale is limited to five task classes and small temporary workspaces.
+- Real evaluation results are tied to the exact model, provider, prompts, and run count.
+- Token usage is not reported unless the Agent result schema exposes reliable usage data.

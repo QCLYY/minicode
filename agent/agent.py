@@ -210,6 +210,7 @@ class ClaudeCodeMini:
             "plan": final_state.get("plan", []),
             "tool_history": final_state.get("tool_history", []),
             "phase": phase,
+            "finish_reason": final_state.get("finish_reason", "normal"),
             "error_message": final_state.get("error_message", ""),
             "iteration": final_state.get("iteration", 0),
         }

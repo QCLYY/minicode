@@ -97,5 +97,14 @@ class AgentState(TypedDict, total=False):
     error_message: str
     """The most recent error message, if any. Injected as feedback on retry."""
 
+    finish_reason: str
+    """Why execution finished, e.g. normal completion or auditor_blocked."""
+
+    auditor_blocked: bool
+    """True when Intent Auditor blocked a proposed tool action."""
+
+    auditor_blocked_answer: str
+    """Fallback user-facing answer used when Intent Auditor blocks execution."""
+
     final_answer: str
     """The final summary returned to the user when the task is complete."""
