@@ -7,6 +7,7 @@ import pytest
 import tempfile
 import os
 import platform
+import sys
 from pathlib import Path
 
 # ── Test ToolResult ───────────────────────────────────────────────
@@ -453,6 +454,8 @@ class TestShellTool:
         result = await tool.execute(command="echo hello")
         assert result.success
         assert "hello" in result.output
+        assert result.metadata["risk_level"] == "low"
+        assert result.metadata["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_command_working_directory(self, tool, tmp_path):
@@ -472,6 +475,53 @@ class TestShellTool:
     async def test_blocked_dangerous_command(self, tool):
         result = await tool.execute(command="rm -rf / something")
         assert not result.success
+        assert "blocked" in result.error.lower()
+        assert result.metadata["risk_level"] == "high"
+        assert result.metadata["allowed"] is False
+        assert result.metadata["blocked_reason"]
+
+    @pytest.mark.asyncio
+    async def test_py_compile_command_allowed(self, tool, tmp_path):
+        (tmp_path / "ok.py").write_text("x = 1\n")
+        result = await tool.execute(command=f"{sys.executable} -m py_compile ok.py")
+        assert result.success
+        assert result.metadata["risk_level"] == "low"
+        assert result.metadata["allowed"] is True
+
+    @pytest.mark.asyncio
+    async def test_medium_risk_command_is_marked_but_allowed(self, tool):
+        result = await tool.execute(command="mkdir created_dir")
+        assert result.success
+        assert result.metadata["risk_level"] == "medium"
+        assert result.metadata["allowed"] is True
+        assert not result.metadata["blocked_reason"]
+
+    def test_pytest_command_classified_low(self):
+        from tools.shell import classify_shell_command
+
+        risk = classify_shell_command("pytest tests -q")
+        assert risk["risk_level"] == "low"
+        assert risk["allowed"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf .",
+            "rmdir /s /q build",
+            "git reset --hard",
+            "git push origin main --force",
+            "  GiT    ReSeT    --Hard  ",
+            "cmd /c git reset --hard",
+            'powershell -Command "rm -rf ."',
+        ],
+    )
+    async def test_high_risk_commands_are_blocked(self, tool, command):
+        result = await tool.execute(command=command)
+        assert not result.success
+        assert result.metadata["risk_level"] == "high"
+        assert result.metadata["allowed"] is False
+        assert result.metadata["blocked_reason"]
         assert "blocked" in result.error.lower()
 
     @pytest.mark.asyncio

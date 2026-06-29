@@ -13,13 +13,12 @@ Usage:
 import argparse
 import asyncio
 import sys
-from pathlib import Path
 
 # Load environment variables from .env before anything else
 from dotenv import load_dotenv
 load_dotenv()
 
-from cli.app import AgentCLI, print_result
+from cli.app import AgentCLI
 from agent.agent import ClaudeCodeMini
 from config.settings import settings
 from rich.console import Console
@@ -105,34 +104,36 @@ def _resolve_mode(mode: str | None) -> str:
     return mode
 
 
+def _build_agent_config(args) -> dict:
+    """Build the shared Agent/CLI config from parsed command-line args."""
+    return {
+        "workspace_path": args.workspace or settings.workspace_path,
+        "mode": _resolve_mode(args.mode),
+        "max_iterations": args.max_iters,
+        "max_retries_per_step": args.max_retries,
+        "memory_enabled": settings.memory_enabled and not args.no_memory,
+        "context_max_tokens": (
+            args.context_max_tokens
+            if args.context_max_tokens is not None
+            else settings.context_max_tokens
+        ),
+    }
+
+
 async def run_single_task(args):
     """Execute a single task and print results."""
     console = Console()
-
-    workspace_path = args.workspace or settings.workspace_path
-    mode = _resolve_mode(args.mode)
+    config = _build_agent_config(args)
 
     try:
-        agent = ClaudeCodeMini(
-            workspace_path=workspace_path,
-            mode=mode,
-            max_iterations=args.max_iters,
-            max_retries_per_step=args.max_retries,
-            memory_enabled=not args.no_memory,
-            context_max_tokens=args.context_max_tokens or settings.context_max_tokens,
-        )
-
         if args.raw:
+            agent = ClaudeCodeMini(**config)
             result = await agent.run(args.task)
             import json
             console.print(json.dumps(result, indent=2, ensure_ascii=False))
         else:
             # Use CLI streaming with memory support
-            cli = AgentCLI(
-                workspace_path=workspace_path,
-                mode=mode,
-                memory_enabled=not args.no_memory,
-            )
+            cli = AgentCLI(**config)
             await cli.run_task(args.task)
 
     except Exception as e:
@@ -142,12 +143,8 @@ async def run_single_task(args):
 
 async def run_interactive(args):
     """Launch the interactive REPL."""
-    mode = _resolve_mode(args.mode)
-    cli = AgentCLI(
-        workspace_path=args.workspace,
-        mode=mode,
-        memory_enabled=not getattr(args, "no_memory", False),
-    )
+    config = _build_agent_config(args)
+    cli = AgentCLI(**config)
     await cli.run_interactive()
 
 
