@@ -2,6 +2,7 @@
 
 import asyncio
 import platform
+import re
 from tools.base import BaseTool, ToolResult
 from runtime.shell_platform import get_shell_environment
 
@@ -14,6 +15,161 @@ _SHELL_BASE_DESCRIPTION = (
     "indefinitely (like starting a server without backgrounding). "
     "The command's working directory is already the workspace root."
 )
+
+
+_HIGH_RISK_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(r"\brm\s+.*-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b"),
+        "recursive forced deletion with rm",
+    ),
+    (
+        re.compile(r"\b(?:rmdir|rd)\s+.*(?:/s\b|-[a-z]*r)"),
+        "recursive directory deletion",
+    ),
+    (
+        re.compile(r"\b(?:del|erase)\s+.*(?:/s\b|-[a-z]*r)"),
+        "recursive file deletion",
+    ),
+    (re.compile(r"\bformat(?:\.com)?\b"), "disk formatting command"),
+    (re.compile(r"\bmkfs(?:\.|\s|$)"), "filesystem creation command"),
+    (re.compile(r"\bdiskpart\b"), "disk partitioning command"),
+    (re.compile(r"\bdd\s+if="), "raw disk copy command"),
+    (re.compile(r":\(\)\s*\{\s*:\|:&\s*\};:"), "recursive shell process bomb"),
+    (re.compile(r"\b(?:shutdown|reboot)\b"), "system shutdown/reboot command"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b"), "destructive git reset"),
+    (
+        re.compile(r"\bgit\s+clean\s+.*(?:-fd[a-z]*|-df[a-z]*|-f\s+-d|-d\s+-f)\b"),
+        "destructive git clean",
+    ),
+    (
+        re.compile(r"\bgit\s+push\s+.*(?:--force|-f\b)"),
+        "forced git push",
+    ),
+    (
+        re.compile(
+            r"\b(?:rm|del|erase|rmdir|rd|remove-item)\b.*"
+            r"(?:\.\.|[a-z]:\\|/(?:etc|bin|usr|var|home|root)\b|"
+            r"\\(?:windows|system32)\b)"
+        ),
+        "deletion target appears outside the workspace",
+    ),
+    (
+        re.compile(
+            r"\b(?:curl|wget|iwr|invoke-webrequest)\b.*(?:\||&&|;).*"
+            r"\b(?:bash|sh|powershell|pwsh|cmd|iex|invoke-expression)\b"
+        ),
+        "downloaded content is executed directly",
+    ),
+    (
+        re.compile(r"\b(?:iex|invoke-expression)\b"),
+        "PowerShell Invoke-Expression execution",
+    ),
+    (
+        re.compile(r"\bremove-item\b.*(?:-recurse|/s).*(?:-force|/q)"),
+        "forced recursive PowerShell deletion",
+    ),
+]
+
+_MEDIUM_RISK_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(?:mkdir|md)\b"), "creates directories"),
+    (re.compile(r"\b(?:copy|cp|xcopy|robocopy)\b"), "copies files"),
+    (re.compile(r"\b(?:move|mv)\b"), "moves files"),
+    (re.compile(r"\bgit\s+add\b"), "stages git changes"),
+    (
+        re.compile(r"\b(?:pip|python\s+-m\s+pip)\s+install\b"),
+        "installs Python packages",
+    ),
+    (re.compile(r"\bnpm\s+install\b"), "installs Node packages"),
+]
+
+_LOW_RISK_PATTERNS: list[re.Pattern] = [
+    re.compile(r"^(?:dir|ls|pwd|cd|type|cat|echo|where|whoami)(?:\s|$)"),
+    re.compile(r"^(?:python|py|[\w:./\\ -]*python\.exe)\s+-m\s+py_compile\b"),
+    re.compile(r"^(?:python|py|[\w:./\\ -]*python\.exe)\s+--version\b"),
+    re.compile(
+        r"^(?:pytest|python\s+-m\s+pytest|[\w:./\\ -]*python\.exe\s+-m\s+pytest)\b"
+    ),
+    re.compile(r"^git\s+(?:status|diff)(?:\s|$)"),
+]
+
+
+def _normalize_command(command: str) -> str:
+    """Normalize shell text for lightweight risk checks."""
+    text = (command or "").strip().lower()
+    text = text.replace("`", "").replace("^", "")
+    return re.sub(r"\s+", " ", text)
+
+
+def _strip_common_wrapper(command: str) -> str:
+    """Expose the inner command for simple cmd/powershell wrappers."""
+    text = command.strip()
+    changed = True
+    while changed:
+        changed = False
+
+        cmd_match = re.match(r"^cmd(?:\.exe)?\s+/[cs]\s+(.+)$", text)
+        if cmd_match:
+            text = cmd_match.group(1).strip().strip("\"'")
+            changed = True
+            continue
+
+        ps_match = re.match(
+            r"^(?:powershell|powershell\.exe|pwsh|pwsh\.exe)\s+(.+)$",
+            text,
+        )
+        if ps_match:
+            rest = ps_match.group(1).strip()
+            command_match = re.search(r"(?:-command|-c)\s+(.+)$", rest)
+            if command_match:
+                text = command_match.group(1).strip().strip("\"'")
+                changed = True
+
+    return text
+
+
+def classify_shell_command(command: str) -> dict:
+    """Classify a command as low, medium, or high risk."""
+    normalized = _normalize_command(command)
+    unwrapped = _strip_common_wrapper(normalized)
+    check_text = f"{normalized} {unwrapped}".strip()
+
+    if not normalized:
+        return {"risk_level": "low", "allowed": True, "blocked_reason": ""}
+
+    for pattern, reason in _HIGH_RISK_PATTERNS:
+        if pattern.search(check_text):
+            return {
+                "risk_level": "high",
+                "allowed": False,
+                "blocked_reason": f"Blocked high-risk shell command: {reason}.",
+            }
+
+    for pattern, reason in _MEDIUM_RISK_PATTERNS:
+        if pattern.search(unwrapped):
+            return {
+                "risk_level": "medium",
+                "allowed": True,
+                "blocked_reason": "",
+                "risk_reason": reason,
+            }
+
+    segments = [
+        part.strip()
+        for part in re.split(r"\s*(?:&&|\|\||;|&|\|)\s*", unwrapped)
+        if part.strip()
+    ]
+    if segments and all(
+        any(pattern.search(segment) for pattern in _LOW_RISK_PATTERNS)
+        for segment in segments
+    ):
+        return {"risk_level": "low", "allowed": True, "blocked_reason": ""}
+
+    return {
+        "risk_level": "medium",
+        "allowed": True,
+        "blocked_reason": "",
+        "risk_reason": "unrecognized shell command; allowed with medium-risk metadata",
+    }
 
 
 class ShellTool(BaseTool):
@@ -39,14 +195,6 @@ class ShellTool(BaseTool):
         "required": ["command"],
     }
 
-    # Commands that will be blocked for safety
-    BLOCKED_COMMANDS = [
-        "rm -rf /",
-        "mkfs.",
-        "dd if=",
-        ":(){ :|:& };:",  # fork bomb
-    ]
-
     def __init__(self, workspace):
         self._workspace = workspace
         self._shell_env = get_shell_environment()
@@ -56,13 +204,17 @@ class ShellTool(BaseTool):
 
     async def execute(self, command: str, timeout: int = 60) -> ToolResult:
         try:
-            # Basic safety check
-            for blocked in self.BLOCKED_COMMANDS:
-                if blocked in command:
-                    return ToolResult(
-                        success=False,
-                        error=f"Blocked dangerous command (matched pattern: '{blocked}')",
-                    )
+            risk = classify_shell_command(command)
+            if not risk["allowed"]:
+                return ToolResult(
+                    success=False,
+                    error=risk["blocked_reason"],
+                    metadata={
+                        "risk_level": risk["risk_level"],
+                        "allowed": False,
+                        "blocked_reason": risk["blocked_reason"],
+                    },
+                )
 
             # Apply timeout cap
             timeout = min(max(timeout, 1), 300)
@@ -118,6 +270,9 @@ class ShellTool(BaseTool):
                 success=success,
                 output=f"[{status}] {command}\n{output}",
                 metadata={
+                    "risk_level": risk["risk_level"],
+                    "allowed": True,
+                    "blocked_reason": "",
                     "exit_code": exit_code,
                     "stdout_len": len(stdout_bytes),
                     "stderr_len": len(stderr_bytes),
