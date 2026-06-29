@@ -246,6 +246,116 @@ class TestProjectMemory:
         assert len(results) >= 1
         assert "matrix" in results[0].user_task.lower()
 
+    def test_fallback_search_when_vector_client_unavailable(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn(
+            "t1", "Implement matrix multiplication",
+            "Created matrix_mul.py", files_changed=["matrix_mul.py"],
+        ))
+        pm.add_turn(self._make_turn(
+            "t2", "Add logging to all modules",
+            "Added logging", files_changed=["main.py"],
+        ))
+
+        results = pm.search("matrix", k=3)
+        assert [turn.id for turn in results] == ["t1"]
+
+    def test_fallback_search_matches_logging(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn("t1", "Implement matrix multiplication", "Done"))
+        pm.add_turn(self._make_turn("t2", "Add logging to all modules", "Added logging"))
+
+        results = pm.search("logging", k=3)
+        assert [turn.id for turn in results] == ["t2"]
+
+    def test_fallback_search_matches_filename(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn(
+            "t1", "Implement multiplication",
+            "Created helper", files_changed=["src/math/matrix_mul.py"],
+        ))
+
+        results = pm.search("matrix_mul.py", k=3)
+        assert [turn.id for turn in results] == ["t1"]
+
+    def test_fallback_search_unrelated_returns_empty(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn("t1", "Implement matrix multiplication", "Done"))
+
+        assert pm.search("authentication", k=3) == []
+
+    def test_fallback_search_empty_memory_returns_empty(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+
+        assert pm.search("matrix", k=3) == []
+
+    def test_fallback_search_respects_k_limit(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        for i in range(3):
+            pm.add_turn(self._make_turn(
+                f"t{i}", f"Implement matrix feature {i}",
+                f"Updated matrix module {i}",
+            ))
+
+        results = pm.search("matrix", k=2)
+        assert len(results) == 2
+
+    def test_fallback_search_orders_by_relevance(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn("weak", "Update math helper", "Touches matrix code"))
+        pm.add_turn(self._make_turn(
+            "strong", "Implement matrix multiplication",
+            "Created matrix multiplication in matrix_mul.py",
+            files_changed=["matrix_mul.py"],
+        ))
+
+        results = pm.search("matrix multiplication", k=2)
+        assert [turn.id for turn in results] == ["strong", "weak"]
+
+    def test_fallback_search_matches_chinese_keywords(self, pm, monkeypatch):
+        import memory.project as project
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn(
+            "zh", "实现矩阵乘法",
+            "创建 matrix_mul.py 并完成矩阵计算逻辑",
+            files_changed=["matrix_mul.py"],
+        ))
+
+        results = pm.search("矩阵", k=3)
+        assert [turn.id for turn in results] == ["zh"]
+
+    def test_search_falls_back_when_vector_search_raises(self, pm, monkeypatch):
+        import memory.project as project
+
+        class FakeEmbeddingClient:
+            def embed_single(self, text):
+                return [0.0, 1.0, 0.0]
+
+            def encode_vector(self, vector):
+                return b"fake-vector"
+
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: None)
+        pm.add_turn(self._make_turn(
+            "t1", "Implement matrix multiplication",
+            "Created matrix_mul.py", files_changed=["matrix_mul.py"],
+        ))
+        monkeypatch.setattr(project, "_get_embedding_client", lambda: FakeEmbeddingClient())
+
+        def raise_vector_error(self, query_hex, k):
+            raise RuntimeError("vector db offline")
+
+        monkeypatch.setattr(project.ProjectMemory, "_vdb_vector_search", raise_vector_error)
+
+        results = pm.search("matrix", k=3)
+        assert [turn.id for turn in results] == ["t1"]
+
     def test_search_empty(self, pm):
         results = pm.search("anything")
         assert results == []

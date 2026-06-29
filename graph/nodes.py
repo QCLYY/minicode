@@ -14,6 +14,7 @@ import json
 import os
 import re
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from langchain_core.messages import (
@@ -485,6 +486,54 @@ def _extract_thought(content: str) -> str | None:
 # ── Execute Node (factory) ────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════
 
+_MUTATING_THOUGHT_RE = re.compile(
+    r"\b(edit|write|modify|delete|remove|run|execute|create|install|commit|push|fix)\b|"
+    r"(编辑|修改|写入|删除|运行|执行|创建|新建|安装|提交|修复)",
+    re.IGNORECASE,
+)
+
+
+def _local_auditor_mismatch(goal: str, thought: str):
+    """Catch obvious simple-question vs mutating-action mismatches locally."""
+    try:
+        from memory.project import is_direct_answer_query, is_conversational_query
+        is_read_only_goal = (
+            is_direct_answer_query(goal) or is_conversational_query(goal)
+        )
+    except Exception:
+        is_read_only_goal = False
+
+    if is_read_only_goal and _MUTATING_THOUGHT_RE.search(thought or ""):
+        return SimpleNamespace(
+            label="contradiction",
+            score=0.1,
+            reason=(
+                "The user goal is a direct/read-only question, but the agent "
+                "planned a mutating or tool-execution action."
+            ),
+            path="local",
+        )
+    return None
+
+
+def _build_auditor_blocked_answer(task: str, thought: str, result) -> str:
+    reason = getattr(result, "reason", "") or "The proposed action was not aligned with the user goal."
+    return (
+        "Intent Auditor blocked the proposed tool action because it did not "
+        "match the user's request.\n\n"
+        f"Task: {task}\n"
+        f"Blocked thought: {thought}\n"
+        f"Reason: {reason}"
+    )
+
+
+def _is_meaningful_final_answer(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    return cleaned.lower() not in {"done", "done.", "ok", "okay"}
+
+
 # Number of times to retry the LLM call itself on transient errors
 _LLM_CALL_MAX_RETRIES = 3
 
@@ -621,6 +670,8 @@ def create_execute_node(
         # V4: Two-Layer Intent Auditor check for agent/ask mode
         # ═══════════════════════════════════════════════════════
         audit_messages = []
+        auditor_blocked = False
+        auditor_blocked_answer = ""
         if mode in ("agent", "ask"):
             has_tool_calls = (
                 hasattr(response, "tool_calls")
@@ -637,6 +688,7 @@ def create_execute_node(
                         app_settings, "auditor_two_layer", True
                     )
                 except Exception:
+                    app_settings = None
                     auditor_enabled = True
                     use_two_layer = True
 
@@ -648,7 +700,14 @@ def create_execute_node(
                                 app_settings, "intent_auditor_threshold", 0.6
                             )
                             # ── V4: Two-Layer audit ───────────
-                            if use_two_layer:
+                            local_result = _local_auditor_mismatch(
+                                state["task"], thought
+                            )
+                            if local_result is not None:
+                                result = local_result
+                                is_error = True
+                                audit_path = result.path
+                            elif use_two_layer:
                                 from intent_auditor.two_layer import (
                                     create_two_layer_auditor,
                                 )
@@ -681,6 +740,10 @@ def create_execute_node(
                                 result = nli_result
 
                             if is_error:
+                                auditor_blocked = True
+                                auditor_blocked_answer = _build_auditor_blocked_answer(
+                                    state["task"], thought, result
+                                )
                                 # Block tool execution:
                                 # Replace response with no-tool-calls version
                                 # and inject auditor feedback for the LLM
@@ -722,12 +785,20 @@ def create_execute_node(
                             # Auditor error → allow (conservative, don't block)
                             pass
 
-        return {
+        updates = {
             "messages": [context_message, response] + audit_messages,
             "iteration": iteration + 1,
             "step_start_tool_count": step_start_tool_count,
             "messages_token_estimate": token_estimate,
         }
+        if auditor_blocked:
+            updates.update({
+                "auditor_blocked": True,
+                "auditor_blocked_answer": auditor_blocked_answer,
+                "finish_reason": "auditor_blocked",
+                "error_message": auditor_blocked_answer,
+            })
+        return updates
 
     return execute_node
 
@@ -1208,6 +1279,33 @@ async def finish_node(
             break
 
     # ── No-tool pass-through (V3) ───────────────────────────
+    if state.get("auditor_blocked"):
+        candidate = _strip_status_block(agent_response)
+        if (
+            not _is_meaningful_final_answer(candidate)
+            or "INTENT_AUDITOR" in candidate
+        ):
+            candidate = state.get("auditor_blocked_answer", "")
+        final_answer = candidate or (
+            "Intent Auditor blocked the proposed tool action because it did "
+            "not match the user's request."
+        )
+
+        if memory_manager is not None and final_answer:
+            try:
+                await memory_manager.record_completed_turn(
+                    state, final_answer, success=False
+                )
+            except Exception:
+                pass
+
+        return {
+            "phase": "done",
+            "finish_reason": "auditor_blocked",
+            "final_answer": final_answer,
+            "error_message": state.get("error_message", ""),
+        }
+
     # If no tools were called, the answer is already complete.
     # Simple Q&A, identity, greetings — use the agent's text as-is.
     if _should_pass_through_finish(state):

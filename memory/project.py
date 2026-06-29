@@ -207,10 +207,78 @@ _DIRECT_ANSWER_PATTERNS = [
 ]
 
 
+# Valid UTF-8 patterns override the corrupted legacy literals above.
+_CONVERSATIONAL_PATTERNS = [
+    r"^你是[谁誰][？?。!！\s]*$",
+    r"^who\s+are\s+you[?.!\s]*$",
+    r"^你能(做|帮)(什么|我什么|啥)[？?。!！\s]*$",
+    r"^(谢谢|多谢|感谢|thanks|thank you)[？?。!！\s]*$",
+    r"^(好的|好|明白了|知道了|ok|okay|got it)[？?。!！\s]*$",
+    r"^(你好|您好|hello|hi|hey)[？?。!！\s]*$",
+    r"^(再见|拜拜|bye|goodbye)[？?。!！\s]*$",
+]
+
+_CODING_KEYWORD_PATTERNS = [
+    r"(读取|读|写入|编辑|修改|修复|删除|运行|执行|测试|代码|报错|搜索|重构|优化)",
+    r"(构建|编译|部署|安装|提交|创建|新建|函数|类|模块|文件|脚本|命令)",
+    r"\b(read|write|edit|modify|fix|delete|run|execute|test|code|bug|error|search|grep)\b",
+    r"\b(refactor|optimize|build|compile|deploy|install|git|commit|push|function|class|module|file|script|command)\b",
+    r"\b[\w.-]+\.(py|js|ts|tsx|jsx|md|json|toml|yaml|yml|txt|html|css)\b",
+]
+
+_DIRECT_ANSWER_PATTERNS = [
+    r"[?？]$",
+    r"\d+\s*[\+\-\*×x/]\s*\d+",
+    r"(是什么|是啥|哪里|哪儿|多少|为什么|为何|如何|怎么|能不能|可以吗|是否|谁|哪一个)",
+    r"^(what|who|when|where|why|how|which|is|are|do|does|can|could)\b",
+]
+
+_EXECUTION_KEYWORD_PATTERNS = [
+    r"(读取|写入|编辑|修改|修复|删除|运行|执行|测试|搜索|重构|优化|构建|编译|部署|安装|提交|创建|新建)",
+    r"\b(read|write|edit|modify|fix|delete|run|execute|test|search|grep|refactor|optimize|build|compile|deploy|install|commit|push|create)\b",
+]
+
+_READ_ONLY_PATTERNS = [
+    r"(是什么|是啥|哪里|哪儿|多少|为什么|为何|如何|怎么|谁|哪一个)",
+    r"(解释|分析|说明|告诉我|回答).*(原因|含义|作用|逻辑|是什么|哪里|问题|错误)",
+    r"只\s*(解释|分析|说明|告诉我|回答)",
+    r"(不要|不|无需|别)\s*(修改|执行|运行|写入|删除|创建|提交|安装)",
+]
+
+_NEGATED_ACTION_PATTERNS = [
+    r"(不要|不|无需|别|禁止)\s*(修改|执行|运行|写入|删除|创建|提交|安装|修复|编辑)",
+    r"(不要|不|无需|别|禁止)\s*(执行|运行)\s*(命令|测试)?",
+    r"\b(do not|don't|dont|without|no)\s+(change|modify|edit|run|execute|write|delete|create|commit|install|fix)\b",
+]
+
+
+def _strip_negated_actions(text: str) -> str:
+    cleaned = text
+    for pattern in _NEGATED_ACTION_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _has_positive_execution_intent(task: str) -> bool:
+    task_lower = _strip_negated_actions(task.strip().lower())
+    for pattern in _EXECUTION_KEYWORD_PATTERNS:
+        if re.search(pattern, task_lower, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _has_read_only_intent(task: str) -> bool:
+    task_lower = task.strip().lower()
+    for pattern in _READ_ONLY_PATTERNS:
+        if re.search(pattern, task_lower, flags=re.IGNORECASE):
+            return True
+    return False
+
+
 def has_coding_keywords(task: str) -> bool:
     task_lower = task.strip().lower()
     for pattern in _CODING_KEYWORD_PATTERNS:
-        if re.search(pattern, task_lower):
+        if re.search(pattern, task_lower, flags=re.IGNORECASE):
             return True
     return False
 
@@ -219,19 +287,28 @@ def is_conversational_query(task: str) -> bool:
     task_stripped = task.strip()
     task_lower = task_stripped.lower()
     for pattern in _CONVERSATIONAL_PATTERNS:
-        if re.search(pattern, task_lower):
-            return not has_coding_keywords(task_stripped)
+        if re.search(pattern, task_lower, flags=re.IGNORECASE):
+            return (
+                not _has_positive_execution_intent(task_stripped)
+                and not has_coding_keywords(task_stripped)
+            )
     return False
 
 
 def is_direct_answer_query(task: str) -> bool:
     task_stripped = task.strip()
-    if not task_stripped or has_coding_keywords(task_stripped):
+    if not task_stripped:
+        return False
+    if _has_positive_execution_intent(task_stripped):
+        return False
+    if _has_read_only_intent(task_stripped):
+        return True
+    if has_coding_keywords(task_stripped):
         return False
     if is_conversational_query(task_stripped):
         return True
     for pattern in _DIRECT_ANSWER_PATTERNS:
-        if re.search(task_stripped.lower(), pattern):
+        if re.search(pattern, task_stripped.lower(), flags=re.IGNORECASE):
             return True
     return False
 
@@ -316,26 +393,36 @@ class ProjectMemory:
         """
         if not query.strip():
             return []
+        try:
+            k = int(k)
+        except (TypeError, ValueError):
+            return []
+        if k <= 0:
+            return []
 
         client = _get_embedding_client()
         if client is None:
-            return []
+            return self._fallback_search(query, k)
 
         # Generate query embedding
         try:
             query_emb = client.embed_single(query)
             if not query_emb:
-                return []
+                return self._fallback_search(query, k)
             encoded = client.encode_vector(query_emb)
             query_hex = encoded.hex()
         except Exception as e:
             logger.warning(f"Embedding generation failed: {e}")
-            return []
+            return self._fallback_search(query, k)
 
         # Vector search via Mini Vector DB C++ engine
-        vdb_results = self._vdb_vector_search(query_hex, k * 3)
+        try:
+            vdb_results = self._vdb_vector_search(query_hex, k * 3)
+        except Exception as e:
+            logger.warning(f"VDB vector search failed: {e}")
+            return self._fallback_search(query, k)
         if not vdb_results:
-            return []
+            return self._fallback_search(query, k)
 
         # Combine VDB cosine similarity with time decay
         scored: List[Tuple[TurnRecord, float]] = []
@@ -360,6 +447,22 @@ class ProjectMemory:
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return [turn for turn, _ in scored[:k]]
+
+    def _fallback_search(self, query: str, k: int) -> List[TurnRecord]:
+        """Local JSONL keyword search used when vector search is unavailable."""
+        query_features = _search_features(query)
+        if not query_features["normalized"]:
+            return []
+
+        scored: List[Tuple[TurnRecord, float, int]] = []
+        for index, turn in enumerate(self._store.load_all()):
+            score = _score_turn_for_query(turn, query_features)
+            if score > 0:
+                scored.append((turn, score, index))
+
+        scored.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        return [turn for turn, _, _ in scored[:k]]
+
     def _vdb_insert(self, turn: TurnRecord) -> None:
         """Insert a TurnRecord + its embedding into Mini Vector DB."""
         client = _get_embedding_client()
@@ -441,7 +544,86 @@ def _build_searchable_text(turn):
         parts.append(turn.final_answer[:500])
     if turn.files_changed:
         parts.append(" ".join(turn.files_changed))
+    if turn.tools_used:
+        parts.append(" ".join(turn.tools_used))
     return " ".join(parts)
+
+
+def _normalize_search_text(text: str) -> str:
+    """Lowercase text and normalize punctuation to spaces for keyword search."""
+    lowered = (text or "").lower()
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", lowered, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _search_tokens(text: str) -> List[str]:
+    normalized = _normalize_search_text(text)
+    tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", normalized)
+    result: List[str] = []
+    for token in tokens:
+        if len(token) > 1 or re.search(r"[\u4e00-\u9fff]", token):
+            result.append(token)
+    return result
+
+
+def _cjk_fragments(text: str) -> List[str]:
+    fragments: set[str] = set()
+    for segment in re.findall(r"[\u4e00-\u9fff]+", text or ""):
+        if len(segment) <= 1:
+            fragments.add(segment)
+            continue
+        for width in (2, 3):
+            if len(segment) < width:
+                continue
+            for i in range(0, len(segment) - width + 1):
+                fragments.add(segment[i:i + width])
+    return list(fragments)
+
+
+def _search_features(query: str) -> dict:
+    normalized = _normalize_search_text(query)
+    return {
+        "normalized": normalized,
+        "tokens": _search_tokens(query),
+        "cjk_fragments": _cjk_fragments(query),
+    }
+
+
+def _turn_search_texts(turn: TurnRecord) -> tuple[str, str]:
+    primary_parts = [turn.user_task or "", turn.final_answer or ""]
+    if turn.tools_used:
+        primary_parts.append(" ".join(turn.tools_used))
+    file_text = " ".join(turn.files_changed or [])
+    all_text = " ".join(primary_parts + [file_text])
+    return _normalize_search_text(all_text), _normalize_search_text(file_text)
+
+
+def _score_turn_for_query(turn: TurnRecord, query_features: dict) -> float:
+    all_text, file_text = _turn_search_texts(turn)
+    if not all_text:
+        return 0.0
+
+    score = 0.0
+    phrase = query_features["normalized"]
+    if phrase and phrase in all_text:
+        score += 10.0 + min(len(phrase) / 10.0, 3.0)
+    if phrase and file_text and phrase in file_text:
+        score += 6.0
+
+    for token in query_features["tokens"]:
+        if token in all_text:
+            score += 3.0
+        if file_text and token in file_text:
+            score += 4.0
+
+    for fragment in query_features["cjk_fragments"]:
+        if fragment and fragment in all_text:
+            score += 1.5
+        if fragment and file_text and fragment in file_text:
+            score += 2.0
+
+    return score
+
 
 def _cosine_similarity(a, b):
     """Cosine similarity between two L2-normalized vectors. Result in [0, 1]."""

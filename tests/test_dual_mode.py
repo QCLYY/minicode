@@ -493,6 +493,12 @@ class TestIsConversationalQuery:
 
     def test_direct_answer_detects_general_knowledge(self):
         from memory.project import is_direct_answer_query
+        assert is_direct_answer_query("Python 是什么") is True
+        assert is_direct_answer_query("请解释这个函数，不要修改文件") is True
+        assert is_direct_answer_query("只告诉我错误原因，不要执行命令") is True
+        assert is_direct_answer_query("请修改这个函数") is False
+        assert is_direct_answer_query("运行测试并修复错误") is False
+        assert is_direct_answer_query("创建一个新的 Python 文件") is False
         assert is_direct_answer_query("中国首都是哪里") is True
         assert is_direct_answer_query("你是谁") is True
         assert is_direct_answer_query("修复bug") is False

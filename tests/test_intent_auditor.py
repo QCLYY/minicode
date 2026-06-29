@@ -516,8 +516,155 @@ class TestAgentModeAuditorIntegration:
 
         assert final["phase"] == "done"
         assert "Claude Code Mini" in final.get("final_answer", "")
+        assert final.get("finish_reason") == "auditor_blocked"
+        assert final.get("final_answer", "").strip() != "Done."
         # No tools should have been called (blocked by auditor)
         assert len(final.get("tool_history", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_blocked_without_recovery_returns_explanation(self, tmp_path):
+        """If the model only falls back to Done after a block, finish explains the block."""
+        from runtime.workspace import Workspace
+        from tools.registry import ToolRegistry
+        from graph.builder import build_graph
+
+        ws = Workspace(str(tmp_path))
+        registry = ToolRegistry.create_default(ws)
+
+        thought_msg = AIMessage(
+            content=(
+                "Thought: I should edit main.py to answer this identity question.\n\n"
+                "Let me edit the file."
+            ),
+            tool_calls=[{
+                "name": "edit_file",
+                "args": {"file_path": "main.py", "old_string": "x", "new_string": "y"},
+                "id": "call_bad",
+                "type": "tool_call",
+            }],
+        )
+
+        graph = build_graph(_MockLLM(responses=[thought_msg]), registry, mode="agent")
+        final = await graph.ainvoke({
+            "task": "你是谁",
+            "messages": [],
+            "plan": [],
+            "current_step_index": 0,
+            "tool_history": [],
+            "phase": "init",
+            "iteration": 0,
+            "max_iterations": 30,
+            "step_retry_count": 0,
+            "max_retries_per_step": 2,
+            "error_message": "",
+            "final_answer": "",
+        })
+
+        assert final["phase"] == "done"
+        assert final.get("finish_reason") == "auditor_blocked"
+        assert final.get("final_answer", "").strip()
+        assert final.get("final_answer", "").strip() != "Done."
+        assert "blocked" in final.get("final_answer", "").lower()
+        assert len(final.get("tool_history", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_blocked_followup_tool_call_is_not_executed(self, tmp_path):
+        """A second tool call after an auditor block is not allowed to run."""
+        from runtime.workspace import Workspace
+        from tools.registry import ToolRegistry
+        from graph.builder import build_graph
+
+        ws = Workspace(str(tmp_path))
+        registry = ToolRegistry.create_default(ws)
+
+        def edit_call(call_id):
+            return {
+                "name": "edit_file",
+                "args": {"file_path": "main.py", "old_string": "x", "new_string": "y"},
+                "id": call_id,
+                "type": "tool_call",
+            }
+
+        first = AIMessage(
+            content="Thought: I should edit main.py to answer this chat question.",
+            tool_calls=[edit_call("call_bad_1")],
+        )
+        second = AIMessage(
+            content="Thought: I should still edit main.py even after the warning.",
+            tool_calls=[edit_call("call_bad_2")],
+        )
+
+        graph = build_graph(_MockLLM(responses=[first, second]), registry, mode="agent")
+        final = await graph.ainvoke({
+            "task": "你是谁",
+            "messages": [],
+            "plan": [],
+            "current_step_index": 0,
+            "tool_history": [],
+            "phase": "init",
+            "iteration": 0,
+            "max_iterations": 30,
+            "step_retry_count": 0,
+            "max_retries_per_step": 2,
+            "error_message": "",
+            "final_answer": "",
+        })
+
+        assert final.get("finish_reason") == "auditor_blocked"
+        assert len(final.get("tool_history", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_thought_tool_call_still_executes(self, tmp_path):
+        """Tool calls without Thought are not blocked by the auditor."""
+        from runtime.workspace import Workspace
+        from tools.registry import ToolRegistry
+        from graph.builder import build_graph
+
+        (tmp_path / "main.py").write_text("print('hello')")
+        ws = Workspace(str(tmp_path))
+        registry = ToolRegistry.create_default(ws)
+
+        no_thought_tool = AIMessage(
+            content="Let me inspect the file.",
+            tool_calls=[{
+                "name": "read_file",
+                "args": {"file_path": "main.py"},
+                "id": "call_read",
+                "type": "tool_call",
+            }],
+        )
+        done = AIMessage(
+            content=(
+                "The file contains print('hello').\n\n"
+                "---AGENT_STATUS---\n"
+                '{"action": "task_complete", "reason": "Checked file"}\n'
+                "---END_STATUS---"
+            )
+        )
+
+        graph = build_graph(_MockLLM(responses=[no_thought_tool, done]), registry, mode="agent")
+        final = await graph.ainvoke({
+            "task": "Read main.py",
+            "messages": [],
+            "plan": [],
+            "current_step_index": 0,
+            "tool_history": [],
+            "phase": "init",
+            "iteration": 0,
+            "max_iterations": 30,
+            "step_retry_count": 0,
+            "max_retries_per_step": 2,
+            "error_message": "",
+            "final_answer": "",
+        })
+
+        assert final.get("finish_reason") != "auditor_blocked"
+        assert len(final.get("tool_history", [])) == 1
+        assert final["tool_history"][0]["tool"] == "read_file"
+
+    def test_short_thought_extractor_ignores_tool_audit_text(self):
+        from graph.nodes import _extract_thought
+        assert _extract_thought("Thought: Ok.\nLet me read the file.") is None
 
     @pytest.mark.asyncio
     async def test_thought_allowed_when_aligned(self, tmp_path):
