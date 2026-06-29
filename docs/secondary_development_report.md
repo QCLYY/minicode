@@ -1,31 +1,29 @@
-# MiniCode Secondary Development Report
+# MiniCode Reliability And Evaluation Report
 
 Date: 2026-06-29
 
-## Baseline
+## Stable Baseline
 
-- Before fix: 320/323 passed, 3 failed, 0 errors.
-- Failed areas:
-  - Chinese/direct-answer intent detection.
-  - `ProjectMemory.search()` returning no results when Mini Vector DB / `EmbeddingClient` is unavailable.
-  - Agent-mode Intent Auditor blocked-path handling could fall through to a meaningless `Done.` final answer.
+- Stable tag before this polish pass: `v1.0.0`.
+- Verified baseline: 336 passed, 0 failed, 0 errors.
+- Earlier reliability starting point: 320/323 passed, 3 failed, 0 errors.
 
-## Defects And Root Causes
+## Reliability Fixes Completed Before v1.0.0
 
 ### Chinese Direct-Answer Detection
 
 Root cause:
 
 - `memory/project.py` contained corrupted Chinese intent keyword literals.
-- `is_direct_answer_query()` called `re.search()` with reversed arguments, so direct-answer regexes were not applied to the task text.
-- Coding/action keywords were too broad for read-only Chinese requests containing negated actions such as `不要修改` or `不要执行`.
+- `is_direct_answer_query()` called `re.search()` with reversed arguments.
+- Coding/action keywords were too broad for read-only Chinese requests containing negated actions.
 
 Fix:
 
 - Added valid UTF-8 Chinese and English intent patterns.
 - Added positive execution-intent detection that strips negated actions before matching.
 - Kept execution tasks such as modify, run, create, fix, install, commit, and delete classified as non-direct-answer.
-- Kept read-only requests such as explanation, cause analysis, and general knowledge questions classified as direct-answer.
+- Kept read-only explanation, cause analysis, and general knowledge questions classified as direct-answer.
 
 ### ProjectMemory Search Fallback
 
@@ -46,80 +44,81 @@ Fix:
 
 Root cause:
 
-- In agent mode, the blocked-path audit could reuse the same mock/agent LLM for NLI fallback.
-- That consumed the response intended for the agent's reconsidered answer.
-- The next agent call then returned the mock fallback `Done.`, and `finish_node` treated it like a normal no-tool completion.
+- In agent mode, a blocked thought/tool path could fall through to a mock or fallback `Done.` response.
 - The state did not clearly distinguish normal completion from an Intent Auditor block.
 
 Fix:
 
-- Added a small local mismatch guard for obvious direct/read-only user goals paired with mutating tool thoughts.
 - Added `auditor_blocked`, `finish_reason`, and `auditor_blocked_answer` state fields.
 - Preserved the normal allowed-tool path.
 - Made `finish_node` prefer a meaningful recovery answer after a block, and fall back to a clear block explanation instead of `Done.`.
 - Marked blocked completions with `finish_reason="auditor_blocked"` and memory success `False`.
 
-## Modified Files
+## v1.1.0 Polish Scope
 
-- `memory/project.py`
-- `agent/state.py`
-- `graph/nodes.py`
-- `graph/routing.py`
-- `tests/test_dual_mode.py`
-- `tests/test_intent_auditor.py`
-- `tests/test_memory.py`
-- `.gitignore`
-- `docs/secondary_development_report.md`
+### Project Positioning
 
-## Tests Added
+Documentation now describes MiniCode as a self-designed terminal Coding Agent with independently implemented core architecture and feature development. Legacy wording about external project lineage was removed.
 
-- Added 9 new pytest test functions for ProjectMemory fallback behavior.
-- Added 4 new pytest test functions for Intent Auditor blocked/allowed behavior.
-- Added 6 direct-answer regression assertions for Chinese/read-only/execution classification.
+### CLI Configuration Forwarding
 
-## Verification
+Root cause:
 
-Target tests:
+- Non-raw single-task mode created a `ClaudeCodeMini` instance with user parameters, but did not use it.
+- The actual non-raw execution path created `AgentCLI` without forwarding `max_iters`, `max_retries`, or `context_max_tokens`.
+- `--no-memory` did not consistently share the same config-building path as raw mode.
 
-- `tests/test_dual_mode.py::TestIsConversationalQuery::test_direct_answer_detects_general_knowledge`: passed.
-- `tests/test_graph.py::TestIsDirectAnswerQuery::test_general_knowledge_questions`: passed.
-- `tests/test_memory.py::TestProjectMemory::test_search_returns_relevant`: passed.
+Fix:
 
-Related module tests:
+- Added one shared `_build_agent_config()` in `main.py`.
+- Raw and non-raw single-task paths now use the same config source.
+- `AgentCLI` now accepts and forwards `max_iterations`, `max_retries_per_step`, and `context_max_tokens`.
+- `--no-memory` takes priority over `MEMORY_ENABLED=true`.
+- Mode switching inside `AgentCLI` preserves the same runtime limits.
 
-- Command: `D:\App\Anaconda\envs\minicode\python.exe -m pytest tests/test_dual_mode.py tests/test_graph.py tests/test_memory.py -q`
-- Result: 136 passed.
-- Command: `D:\App\Anaconda\envs\minicode\python.exe -m pytest tests/test_intent_auditor.py -q`
-- Result: 34 passed.
+Added tests:
 
-Full test run:
+- Non-raw mode forwards `max_iterations`.
+- Non-raw mode forwards `max_retries_per_step`.
+- Non-raw mode forwards `context_max_tokens`.
+- Raw and non-raw modes use the same config builder.
+- `--no-memory` overrides enabled memory settings.
+- User-specified workspace and mode reach `AgentCLI` / `ClaudeCodeMini`.
 
-- Command: `D:\App\Anaconda\envs\minicode\python.exe -m pytest tests -q --basetemp="D:\App\Codex\workspaces\minicode\pytest_tmp_run_pycharm\final"`
-- Result: 336 passed, 0 failed, 0 errors.
-- Change from original baseline: 320/323 passed to 336/336 passed.
+### Shell Risk Controls
 
-## Pytest Cache Handling
+Added lightweight Shell command risk classification:
 
-- `.pytest_cache/`, `.pytest_tmp/`, and `pytest_tmp_run*/` are ignored.
-- No pytest cache warning appeared in the final full run.
+- `low`: read-only commands such as `dir`, `ls`, `pwd`, `type`, `cat`, `pytest`, `python -m py_compile`, `git status`, and `git diff`.
+- `medium`: commands that may modify workspace or dependency state, such as `mkdir`, `copy`, `move`, `git add`, `pip install`, and `npm install`.
+- `high`: dangerous or irreversible commands such as `rm -rf`, `rmdir /s`, `del /s`, `format`, `mkfs`, `diskpart`, `shutdown`, `reboot`, `git reset --hard`, `git clean -fd`, `git push --force`, deletion outside the workspace, and downloaded-script execution.
 
-## External Dependencies And Limits
+High-risk commands are blocked before execution. Allowed results include `risk_level`, `allowed`, and `blocked_reason` metadata. This is not a complete system sandbox.
 
-- Mini Vector DB / `EmbeddingClient` remains optional for vector search; local JSONL fallback now handles unavailable vector components.
-- Intent Auditor still depends on its existing embedding or NLI path for non-obvious alignment checks; the new local guard only handles clear direct/read-only goal versus mutating-action mismatches.
-- This pass did not modify multi-agent, MCP, shell safety, web UI, or the LangGraph graph topology.
+Added tests:
 
-## Final-Stage Harness And Documentation
+- Read-only commands remain allowed.
+- `python -m py_compile` remains allowed.
+- Medium-risk commands execute but are marked.
+- `rm -rf`, `rmdir /s`, `git reset --hard`, and `git push --force` are blocked.
+- Case changes, extra spaces, and `cmd` / `powershell` wrappers do not bypass obvious high-risk checks.
 
-Added:
+## v1.1.0 Verification
+
+- Targeted CLI/Shell tests: 22 passed.
+- Full test command: `D:\App\Anaconda\envs\minicode\python.exe -m pytest tests -q -p no:cacheprovider`
+- Full test result: 351 passed in 6.64s, 0 failed, 0 errors.
+- New test count in this polish pass: 15.
+
+## Evaluation Harness
+
+Added in `v1.0.0`:
 
 - `benchmarks/smoke_eval.py`
 - `benchmarks/cases/README.md`
 - `benchmarks/reports/mock_smoke.json`
 - `benchmarks/reports/mock_smoke.md`
 - `benchmarks/reports/comparison.md`
-- `docs/resume_project_summary.md`
-- Updated `README.md`
 
 Harness scope:
 
@@ -132,13 +131,12 @@ Harness verification:
 
 - Command: `D:\App\Anaconda\envs\minicode\python.exe benchmarks\smoke_eval.py --provider mock --runs-per-case 3 --out-dir benchmarks\reports --report-name mock_smoke --python-exe D:\App\Anaconda\envs\minicode\python.exe`
 - Result: 15/15 mock smoke runs passed.
-- Final pytest command: `D:\App\Anaconda\envs\minicode\python.exe -m pytest tests -q -p no:cacheprovider`
-- Final pytest result: 336 passed in 6.80s.
-- Formal real-model evaluation was not executed because no real model run was requested with a configured API key during this phase.
+- Formal real-model evaluation was not executed.
 - The mock smoke result validates Harness plumbing only and is not a real-model capability score.
 
-Baseline comparison:
+## Current Limits
 
-- Actual Harness baseline-vs-develop comparison was not executed because the `baseline` tag predates the new Harness entry point.
-- No fake `baseline.json` or `improved.json` files were created.
-- Existing verified regression data remains: 320/323 before reliability fixes and 336/336 after reliability fixes.
+- Shell risk controls are lightweight checks, not a complete OS sandbox.
+- Intent Auditor is not a complete policy engine.
+- Mini Vector DB / `EmbeddingClient` remains optional for vector search; local JSONL fallback handles unavailable vector components.
+- Harness scale is limited and mock results must not be presented as real-model capability.

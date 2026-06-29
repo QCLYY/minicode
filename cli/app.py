@@ -68,16 +68,32 @@ class AgentCLI:
         self,
         workspace_path: Optional[str] = None,
         mode: str = "agent",
-        memory_enabled: bool = True,
+        memory_enabled: Optional[bool] = None,
+        max_iterations: Optional[int] = None,
+        max_retries_per_step: Optional[int] = None,
+        context_max_tokens: Optional[int] = None,
     ):
         self._console = Console()
         self._workspace_path = workspace_path or settings.workspace_path
         self._mode = mode
-        self._memory_enabled = memory_enabled
+        self._memory_enabled = (
+            settings.memory_enabled if memory_enabled is None else memory_enabled
+        )
+        self._max_iterations = (
+            settings.max_iterations if max_iterations is None else max_iterations
+        )
+        self._max_retries_per_step = (
+            2 if max_retries_per_step is None else max_retries_per_step
+        )
+        self._context_max_tokens = (
+            settings.context_max_tokens
+            if context_max_tokens is None
+            else context_max_tokens
+        )
 
         # V2.1: Create shared MemoryManager (lives for the entire REPL session)
         self._memory_manager = None
-        if memory_enabled:
+        if self._memory_enabled:
             from memory.manager import MemoryManager
             ws_root = Path(self._workspace_path).resolve()
             self._memory_manager = MemoryManager(
@@ -95,6 +111,9 @@ class AgentCLI:
                 mode=self._mode,
                 memory_enabled=self._memory_enabled,
                 memory_manager=self._memory_manager,
+                max_iterations=self._max_iterations,
+                max_retries_per_step=self._max_retries_per_step,
+                context_max_tokens=self._context_max_tokens,
             )
         except Exception as e:
             self._console.print(Text(f"Failed to initialize agent: {e}", style="red"))
@@ -173,11 +192,20 @@ class AgentCLI:
                 mode=self._mode,
                 memory_enabled=self._memory_enabled,
                 memory_manager=self._memory_manager,
+                max_iterations=self._max_iterations,
+                max_retries_per_step=self._max_retries_per_step,
+                context_max_tokens=self._context_max_tokens,
             )
+            if self._memory_manager is None:
+                memory_status = "Memory disabled."
+            else:
+                memory_status = (
+                    f"Memory ({len(self._memory_manager.get_session_turns())} "
+                    f"turns) preserved."
+                )
             self._console.print(
                 Text(
-                    f"Switched to {new_mode} mode. "
-                    f"Memory ({len(self._memory_manager.get_session_turns())} turns) preserved.",
+                    f"Switched to {new_mode} mode. {memory_status}",
                     style="green",
                 )
             )

@@ -14,7 +14,8 @@ import pytest
 import json
 import io
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 from rich.console import Console
@@ -437,6 +438,131 @@ class TestMainArgs:
             assert args.max_iters == 50
             assert args.max_retries == 3
             assert args.raw is True
+
+
+class TestCLIParameterForwarding:
+    """Verify raw and Rich CLI modes receive the same runtime config."""
+
+    def _args(
+        self,
+        tmp_path,
+        *,
+        raw=False,
+        no_memory=False,
+        mode="plan",
+        max_iters=7,
+        max_retries=4,
+        context_max_tokens=12345,
+    ):
+        return SimpleNamespace(
+            task="Check config",
+            workspace=str(tmp_path),
+            model=None,
+            mode=mode,
+            max_iters=max_iters,
+            max_retries=max_retries,
+            no_memory=no_memory,
+            context_max_tokens=context_max_tokens,
+            raw=raw,
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_raw_mode_forwards_agent_config(self, tmp_path, monkeypatch):
+        import main
+
+        monkeypatch.setattr(main.settings, "memory_enabled", True)
+        args = self._args(tmp_path, raw=False, mode="ask")
+
+        with patch("main.AgentCLI") as cli_cls:
+            cli = MagicMock()
+            cli.run_task = AsyncMock()
+            cli_cls.return_value = cli
+
+            await main.run_single_task(args)
+
+        kwargs = cli_cls.call_args.kwargs
+        assert kwargs["workspace_path"] == str(tmp_path)
+        assert kwargs["mode"] == "ask"
+        assert kwargs["max_iterations"] == 7
+        assert kwargs["max_retries_per_step"] == 4
+        assert kwargs["context_max_tokens"] == 12345
+        assert kwargs["memory_enabled"] is True
+        cli.run_task.assert_awaited_once_with("Check config")
+
+    @pytest.mark.asyncio
+    async def test_raw_mode_forwards_same_agent_config(self, tmp_path, monkeypatch):
+        import main
+
+        monkeypatch.setattr(main.settings, "memory_enabled", True)
+        args = self._args(tmp_path, raw=True, mode="agent")
+
+        with patch("main.ClaudeCodeMini") as agent_cls:
+            agent = MagicMock()
+            agent.run = AsyncMock(return_value={
+                "success": True,
+                "final_answer": "ok",
+                "plan": [],
+                "tool_history": [],
+                "phase": "done",
+                "error_message": "",
+                "iteration": 0,
+            })
+            agent_cls.return_value = agent
+
+            await main.run_single_task(args)
+
+        kwargs = agent_cls.call_args.kwargs
+        assert kwargs["workspace_path"] == str(tmp_path)
+        assert kwargs["mode"] == "agent"
+        assert kwargs["max_iterations"] == 7
+        assert kwargs["max_retries_per_step"] == 4
+        assert kwargs["context_max_tokens"] == 12345
+        assert kwargs["memory_enabled"] is True
+        agent.run.assert_awaited_once_with("Check config")
+
+    def test_raw_and_non_raw_config_builder_is_identical(self, tmp_path, monkeypatch):
+        import main
+
+        monkeypatch.setattr(main.settings, "memory_enabled", True)
+        raw_args = self._args(tmp_path, raw=True)
+        non_raw_args = self._args(tmp_path, raw=False)
+
+        assert main._build_agent_config(raw_args) == main._build_agent_config(non_raw_args)
+
+    def test_no_memory_overrides_enabled_settings(self, tmp_path, monkeypatch):
+        import main
+
+        monkeypatch.setattr(main.settings, "memory_enabled", True)
+        args = self._args(tmp_path, no_memory=True)
+
+        assert main._build_agent_config(args)["memory_enabled"] is False
+
+    def test_agent_cli_initialization_passes_runtime_config(self, tmp_path):
+        with patch("cli.app.ClaudeCodeMini") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.workspace.root_str = str(tmp_path)
+            mock_agent.tool_registry.tool_names = ["read_file"]
+            mock_agent_cls.return_value = mock_agent
+
+            from cli.app import AgentCLI
+
+            cli = AgentCLI(
+                workspace_path=str(tmp_path),
+                mode="plan",
+                memory_enabled=False,
+                max_iterations=11,
+                max_retries_per_step=5,
+                context_max_tokens=777,
+            )
+
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert cli._agent is mock_agent
+        assert kwargs["workspace_path"] == str(tmp_path)
+        assert kwargs["mode"] == "plan"
+        assert kwargs["memory_enabled"] is False
+        assert kwargs["max_iterations"] == 11
+        assert kwargs["max_retries_per_step"] == 5
+        assert kwargs["context_max_tokens"] == 777
 
 
 # ═══════════════════════════════════════════════════════════════════
