@@ -20,7 +20,8 @@ pytest_tmp_run*/
 
 # Benchmark data (too large)
 benchmarks/data/
-benchmarks/reports/
+benchmarks/tmp*/
+benchmarks/workspaces/
 
 # Debug
 bug/

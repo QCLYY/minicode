@@ -108,3 +108,37 @@ Full test run:
 - Mini Vector DB / `EmbeddingClient` remains optional for vector search; local JSONL fallback now handles unavailable vector components.
 - Intent Auditor still depends on its existing embedding or NLI path for non-obvious alignment checks; the new local guard only handles clear direct/read-only goal versus mutating-action mismatches.
 - This pass did not modify multi-agent, MCP, shell safety, web UI, or the LangGraph graph topology.
+
+## Final-Stage Harness And Documentation
+
+Added:
+
+- `benchmarks/smoke_eval.py`
+- `benchmarks/cases/README.md`
+- `benchmarks/reports/mock_smoke.json`
+- `benchmarks/reports/mock_smoke.md`
+- `benchmarks/reports/comparison.md`
+- `docs/resume_project_summary.md`
+- Updated `README.md`
+
+Harness scope:
+
+- Five task classes: code understanding, code location, single-file edit, bug fix, and intent constraint.
+- Three runs per class, for 15 mock smoke runs.
+- Fixed mock configuration: provider `mock`, model `mock-scripted-llm`, temperature `0.0`, max iterations `8`, max retries `1`, context max tokens `20000`, memory disabled, Intent Auditor disabled for Harness isolation.
+- Reports include success count/rate, abnormal terminations, average tool calls, average iterations, average duration, unauthorized modifications, meaningless final answers, and token usage support status.
+
+Harness verification:
+
+- Command: `D:\App\Anaconda\envs\minicode\python.exe benchmarks\smoke_eval.py --provider mock --runs-per-case 3 --out-dir benchmarks\reports --report-name mock_smoke --python-exe D:\App\Anaconda\envs\minicode\python.exe`
+- Result: 15/15 mock smoke runs passed.
+- Final pytest command: `D:\App\Anaconda\envs\minicode\python.exe -m pytest tests -q -p no:cacheprovider`
+- Final pytest result: 336 passed in 6.80s.
+- Formal real-model evaluation was not executed because no real model run was requested with a configured API key during this phase.
+- The mock smoke result validates Harness plumbing only and is not a real-model capability score.
+
+Baseline comparison:
+
+- Actual Harness baseline-vs-develop comparison was not executed because the `baseline` tag predates the new Harness entry point.
+- No fake `baseline.json` or `improved.json` files were created.
+- Existing verified regression data remains: 320/323 before reliability fixes and 336/336 after reliability fixes.
